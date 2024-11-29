@@ -1,0 +1,20 @@
+# For details & more options, see documentation/AppManifests.md in firmware repo
+
+App(
+    appid="sonicmeter",  # Must be unique
+    name="SonicMeter",  # Displayed in menus
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="main_sonicmeter_app",
+    stack_size=4 * 1024,
+     requires=[
+        "gui",
+    ],
+    fap_category="GPIO",
+    # Optional values
+    # fap_version="0.1",
+    fap_icon="sonicmeter.png",  # 10x10 1-bit PNG
+    fap_description="A simple app that measures distance using the HC-SR04 module",
+    # fap_author="J. Doe",
+    # fap_weburl="https://github.com/user/sonicmeter",
+    fap_icon_assets="images",  # Image assets to compile for this application
+)
