@@ -152,19 +152,6 @@ static void sonicmeter_view_measure_draw_callback(Canvas* canvas, void* model) {
     furi_string_free(xstr);
 }
 
-static GpioPin* sonicmeter_get_trigger_pin(uint8_t index) {
-    switch(index) {
-    case 0:
-        return &gpio_ext_pa4;
-    case 1:
-        return &gpio_ext_pa4;
-    case 2:
-        return &gpio_ext_pa4;
-    default:
-        return NULL;
-    }
-}
-
 /**
  * @brief      Callback for timer elapsed.
  * @details    This function is called when the timer is elapsed.  We use this to queue a redraw event.
@@ -172,11 +159,8 @@ static GpioPin* sonicmeter_get_trigger_pin(uint8_t index) {
 */
 static void sonicmeter_view_measure_timer_callback(void* context) {
     SonicMeterApp* app = (SonicMeterApp*)context;
-    SonicMeterMeasureModel* model = view_get_model(app->view_measure);
 
     // measure distance
-    GpioPin* trigger_pin = sonicmeter_get_trigger_pin(model->setting_triggerpin_index);
-    furi_hal_gpio_write(trigger_pin, false);
 
     view_dispatcher_send_custom_event(app->view_dispatcher, SonicMeterEventIdRedrawScreen);
 }
