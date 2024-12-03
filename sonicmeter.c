@@ -50,7 +50,21 @@ typedef struct {
 typedef struct {
     uint32_t setting_triggerpin_index; // The trigger pin setting index
     uint32_t setting_echopin_index; // The echo pin setting index
+
+    uint32_t echo_us; // The time in microseconds for the echo pin to go high
+    bool have_5v;
+    bool measurement_made;
+    float distance_cm;
 } SonicMeterMeasureModel;
+
+float hc_sr04_duration_to_cm(uint32_t pulse_duration_us) {
+    float distance_mm = (float)pulse_duration_us / 58.0f;
+    return distance_mm / 100.0f;
+}
+
+float cpu_ticks_to_us(uint32_t ticks) {
+    return (float)ticks / furi_hal_cortex_instructions_per_microsecond();
+}
 
 /**
  * @brief      Callback for exiting the application.
@@ -139,7 +153,13 @@ static void sonicmeter_view_measure_draw_callback(Canvas* canvas, void* model) {
     canvas_draw_str(canvas, 35, 8, "Sonic Meter");
     FuriString* xstr = furi_string_alloc();
 
-    furi_string_printf(xstr, "Distance: %d cm", 0);
+    if(m->measurement_made) {
+        furi_string_printf(xstr, "Distance %0.2f cm", (double)m->distance_cm);
+    } else {
+        // Distance: N/A
+        furi_string_printf(xstr, "Distance N/A");
+    }
+
     canvas_draw_str(canvas, 30, 34, furi_string_get_cstr(xstr));
 
     furi_string_printf(
@@ -152,6 +172,30 @@ static void sonicmeter_view_measure_draw_callback(Canvas* canvas, void* model) {
     furi_string_free(xstr);
 }
 
+static const GpioPin* sonicmeter_get_trigger_pin(uint8_t index) {
+    switch(index) {
+    case 0:
+        return &gpio_ext_pa4;
+    case 1:
+        return &gpio_ext_pa4;
+    case 2:
+        return &gpio_ext_pa4;
+    default:
+        return NULL;
+    }
+}
+
+static const GpioPin* sonicmeter_get_echo_pin(uint8_t index) {
+    switch(index) {
+    case 0:
+        return &gpio_ext_pb2;
+    case 1:
+        return &gpio_ext_pb3;
+    default:
+        return NULL;
+    }
+}
+
 /**
  * @brief      Callback for timer elapsed.
  * @details    This function is called when the timer is elapsed.  We use this to queue a redraw event.
@@ -159,8 +203,61 @@ static void sonicmeter_view_measure_draw_callback(Canvas* canvas, void* model) {
 */
 static void sonicmeter_view_measure_timer_callback(void* context) {
     SonicMeterApp* app = (SonicMeterApp*)context;
+    SonicMeterMeasureModel* model = view_get_model(app->view_measure);
 
-    // measure distance
+    model->measurement_made = false;
+
+    if(!model->have_5v) {
+        if(furi_hal_power_is_otg_enabled() || furi_hal_power_is_charging()) {
+            model->have_5v = true;
+        } else {
+            return;
+        }
+    }
+
+    notification_message(app->notifications, &sequence_blink_start_yellow);
+
+    const uint32_t timeout_ms = 100;
+
+    // Setup Pins
+    const GpioPin* trigger_pin = sonicmeter_get_trigger_pin(model->setting_triggerpin_index);
+    furi_hal_gpio_write(trigger_pin, false);
+    furi_hal_gpio_init(trigger_pin, GpioModeOutputPushPull, GpioPullNo, GpioSpeedVeryHigh);
+
+    const GpioPin* echo_pin = sonicmeter_get_echo_pin(model->setting_echopin_index);
+    furi_hal_gpio_write(echo_pin, false);
+    furi_hal_gpio_init(echo_pin, GpioModeInput, GpioPullNo, GpioSpeedVeryHigh);
+
+    // Send Trigger
+    furi_hal_gpio_write(trigger_pin, true);
+    furi_delay_us(10);
+    furi_hal_gpio_write(trigger_pin, false);
+
+    const uint32_t start = furi_get_tick();
+
+    while(furi_get_tick() - start < timeout_ms && furi_hal_gpio_read(echo_pin)) {
+        // wait for echo pin to go low if not already there
+        // Just a safeback
+    }
+
+    while(furi_get_tick() - start < timeout_ms && !furi_hal_gpio_read(echo_pin)) {
+        // wait for echo pin to go high
+    }
+
+    FuriHalCortexTimer beginTimer = furi_hal_cortex_timer_get(0);
+
+    while(furi_get_tick() - start < timeout_ms && furi_hal_gpio_read(echo_pin)) {
+        // wait for echo pin to go low
+    }
+
+    FuriHalCortexTimer endTimer = furi_hal_cortex_timer_get(0);
+
+    uint32_t duration = endTimer.start - beginTimer.start;
+
+    model->echo_us = cpu_ticks_to_us(duration);
+    model->distance_cm = hc_sr04_duration_to_cm(duration);
+    model->measurement_made = true;
+    notification_message(app->notifications, &sequence_blink_stop);
 
     view_dispatcher_send_custom_event(app->view_dispatcher, SonicMeterEventIdRedrawScreen);
 }
@@ -341,6 +438,24 @@ static SonicMeterApp* sonicmeter_app_alloc() {
     return app;
 }
 
+void hc_sr04_init(SonicMeterApp* app) {
+    SonicMeterMeasureModel* model = view_get_model(app->view_measure);
+
+    model->echo_us = -1;
+    model->measurement_made = false;
+
+    furi_hal_power_suppress_charge_enter();
+
+    model->have_5v = false;
+
+    if(furi_hal_power_is_otg_enabled() || furi_hal_power_is_charging()) {
+        model->have_5v = true;
+    } else {
+        furi_hal_power_enable_otg();
+        model->have_5v = true;
+    }
+}
+
 /**
  * @brief      Free the sonicmeter application.
  * @details    This function frees the sonicmeter application resources.
@@ -366,6 +481,23 @@ static void sonicmeter_app_free(SonicMeterApp* app) {
     free(app);
 }
 
+void hc_sr04_exit(SonicMeterApp* app) {
+    SonicMeterMeasureModel* model = view_get_model(app->view_measure);
+
+    if(furi_hal_power_is_otg_enabled()) {
+        furi_hal_power_disable_otg();
+    }
+
+    furi_hal_power_suppress_charge_exit();
+
+    // reset pins
+    const GpioPin* trigger_pin = sonicmeter_get_trigger_pin(model->setting_triggerpin_index);
+    furi_hal_gpio_init(trigger_pin, GpioModeInput, GpioPullNo, GpioSpeedLow);
+
+    const GpioPin* echo_pin = sonicmeter_get_echo_pin(model->setting_echopin_index);
+    furi_hal_gpio_init(echo_pin, GpioModeInput, GpioPullNo, GpioSpeedLow);
+}
+
 /**
  * @brief      Main function for sonicmeter application.
  * @details    This function is the entry point for the sonicmeter application.  It should be defined in
@@ -377,8 +509,11 @@ int32_t main_sonicmeter_app(void* _p) {
     UNUSED(_p);
 
     SonicMeterApp* app = sonicmeter_app_alloc();
+    hc_sr04_init(app);
+
     view_dispatcher_run(app->view_dispatcher);
 
+    hc_sr04_exit(app);
     sonicmeter_app_free(app);
     return 0;
 }
