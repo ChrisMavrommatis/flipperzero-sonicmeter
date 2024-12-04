@@ -16,7 +16,7 @@
 // Change this to BACKLIGHT_AUTO if you don't want the backlight to be continuously on.
 #define BACKLIGHT_ON 1
 
-// Our application menu has 3 items.  You can add more items if you want.
+// Our application menu has 3 items.
 typedef enum {
     SonicMeterSubmenuIndexConfigure,
     SonicMeterSubmenuIndexMeasure,
@@ -50,26 +50,35 @@ typedef struct {
 typedef struct {
     uint32_t setting_triggerpin_index; // The trigger pin setting index
     uint32_t setting_echopin_index; // The echo pin setting index
+    bool setting_debug;
 
+    uint32_t ticks;
     uint32_t echo_us; // The time in microseconds for the echo pin to go high
     bool have_5v;
     bool measurement_made;
     float distance_cm;
 } SonicMeterMeasureModel;
 
-float hc_sr04_duration_to_cm(uint32_t pulse_duration_us) {
-    float distance_mm = (float)pulse_duration_us / 58.0f;
-    return distance_mm / 100.0f;
+uint32_t cpu_ticks_to_us(uint32_t ticks) {
+    return ticks * 1.5888f / 1e2f;
 }
 
-float cpu_ticks_to_us(uint32_t ticks) {
-    return (float)ticks / furi_hal_cortex_instructions_per_microsecond();
+float cpu_ticks_to_hc_sr04_cm(uint32_t ticks) {
+    // Speed of sound in air is 34300 cm/s
+    // The echo pin goes high when the sound wave is sent and received
+    // The distance is half the time it takes for the echo pin to go high
+    // The time is the time it takes for the sound wave to go to the object and back
+    uint32_t pulse_duration = cpu_ticks_to_us(ticks);
+
+    const float speed_of_sound = 0.0343f; // cm/us
+    float distance = pulse_duration * speed_of_sound / 2.0f;
+    return distance;
 }
 
 /**
  * @brief      Callback for exiting the application.
  * @details    This function is called when user press back button.  We return VIEW_NONE to
- *            indicate that we want to exit the application.
+ *             indicate that we want to exit the application.
  * @param      _context  The context - unused
  * @return     next view id
 */
@@ -80,8 +89,8 @@ static uint32_t sonicmeter_navigation_exit_callback(void* _context) {
 
 /**
  * @brief      Callback for returning to submenu.
- * @details    This function is called when user press back button.  We return VIEW_NONE to
- *            indicate that we want to navigate to the submenu.
+ * @details    This function is called when user press back button.  We return SonicMeterViewSubmenu to
+ *             indicate that we want to navigate to the submenu.
  * @param      _context  The context - unused
  * @return     next view id
 */
@@ -94,7 +103,7 @@ static uint32_t sonicmeter_navigation_submenu_callback(void* _context) {
  * @brief      Handle submenu item selection.
  * @details    This function is called when user selects an item from the submenu.
  * @param      context  The context - SonicMeterApp object.
- * @param      index     The SonicMeterSubmenuIndex item that was clicked.
+ * @param      index    The SonicMeterSubmenuIndex item that was clicked.
 */
 static void sonicmeter_submenu_callback(void* context, uint32_t index) {
     SonicMeterApp* app = (SonicMeterApp*)context;
@@ -114,10 +123,10 @@ static void sonicmeter_submenu_callback(void* context, uint32_t index) {
 }
 
 /**
- * Our 1st sample setting is a list of values.  When the user clicks OK on the configuration
+ * Trigger Pin Setting
 */
 static const char* setting_triggerpin_config_label = "Trigger Pin";
-static uint8_t setting_triggerpin_values[] = {1, 2, 3};
+static uint8_t setting_triggerpin_values[] = {0, 1, 2};
 static char* setting_triggerpin_names[] = {"A4", "A6", "A7"};
 static void sonicmeter_setting_triggerpin_change(VariableItem* item) {
     SonicMeterApp* app = variable_item_get_context(item);
@@ -128,10 +137,10 @@ static void sonicmeter_setting_triggerpin_change(VariableItem* item) {
 }
 
 /**
- * Our 2nd sample setting is a list of values.  When the user clicks OK on the configuration
+ *  Echo Pin Setting
 */
 static const char* setting_echopin_config_label = "Echo Pin";
-static uint8_t setting_echopin_values[] = {1, 2};
+static uint8_t setting_echopin_values[] = {0, 1};
 static char* setting_echopin_names[] = {"B2", "B3"};
 static void sonicmeter_setting_echopin_change(VariableItem* item) {
     SonicMeterApp* app = variable_item_get_context(item);
@@ -142,10 +151,28 @@ static void sonicmeter_setting_echopin_change(VariableItem* item) {
 }
 
 /**
+ * Debug setting
+*/
+static const char* setting_debug_config_label = "Debug";
+static uint8_t setting_debug_values[] = {0, 1};
+static char* setting_debug_names[] = {"False", "True"};
+static void sonicmeter_setting_debug_change(VariableItem* item) {
+    SonicMeterApp* app = variable_item_get_context(item);
+    uint8_t index = variable_item_get_current_value_index(item);
+    variable_item_set_current_value_text(item, setting_debug_names[index]);
+    SonicMeterMeasureModel* model = view_get_model(app->view_measure);
+    if(index == 1) {
+        model->setting_debug = true;
+    } else {
+        model->setting_debug = false;
+    }
+}
+
+/**
  * @brief      Callback for drawing the measure screen.
  * @details    This function is called when the screen needs to be redrawn, like when the model gets updated.
  * @param      canvas  The canvas to draw on.
- * @param      model   The model - MyModel object.
+ * @param      model   The model - SonicMeterMeasureModel object.
 */
 static void sonicmeter_view_measure_draw_callback(Canvas* canvas, void* model) {
     SonicMeterMeasureModel* m = (SonicMeterMeasureModel*)model;
@@ -156,11 +183,20 @@ static void sonicmeter_view_measure_draw_callback(Canvas* canvas, void* model) {
     if(m->measurement_made) {
         furi_string_printf(xstr, "Distance %0.2f cm", (double)m->distance_cm);
     } else {
-        // Distance: N/A
         furi_string_printf(xstr, "Distance N/A");
     }
 
-    canvas_draw_str(canvas, 30, 34, furi_string_get_cstr(xstr));
+    if(!m->setting_debug) {
+        canvas_draw_str(canvas, 30, 35, furi_string_get_cstr(xstr));
+    } else {
+        canvas_draw_str(canvas, 30, 25, furi_string_get_cstr(xstr));
+
+        furi_string_printf(xstr, "Ticks: %lu", m->ticks);
+        canvas_draw_str(canvas, 30, 35, furi_string_get_cstr(xstr));
+
+        furi_string_printf(xstr, "Time: %lu us", m->echo_us);
+        canvas_draw_str(canvas, 30, 45, furi_string_get_cstr(xstr));
+    }
 
     furi_string_printf(
         xstr, "Trigger pin: %s", setting_triggerpin_names[m->setting_triggerpin_index]);
@@ -171,6 +207,13 @@ static void sonicmeter_view_measure_draw_callback(Canvas* canvas, void* model) {
 
     furi_string_free(xstr);
 }
+
+/**
+ * @brief     Get the trigger pin based on the setting for the HC-SR04.
+ * @details   This function returns the trigger pin based on the setting for the HC-SR04.
+ * @param index 
+ * @return   The trigger pin.
+ */
 
 static const GpioPin* sonicmeter_get_trigger_pin(uint8_t index) {
     switch(index) {
@@ -185,6 +228,12 @@ static const GpioPin* sonicmeter_get_trigger_pin(uint8_t index) {
     }
 }
 
+/**
+ * @brief     Get the echo pin based on the setting for the HC-SR04.
+ * @details   This function returns the echo pin based on the setting for the HC-SR04.
+ * @param index 
+ * @return   The echo pin.
+ */
 static const GpioPin* sonicmeter_get_echo_pin(uint8_t index) {
     switch(index) {
     case 0:
@@ -198,7 +247,8 @@ static const GpioPin* sonicmeter_get_echo_pin(uint8_t index) {
 
 /**
  * @brief      Callback for timer elapsed.
- * @details    This function is called when the timer is elapsed.  We use this to queue a redraw event.
+ * @details    This function is called when the timer is elapsed.  
+ *             We use this to queue a redraw event.
  * @param      context  The context - SonicMeterApp object.
 */
 static void sonicmeter_view_measure_timer_callback(void* context) {
@@ -235,27 +285,28 @@ static void sonicmeter_view_measure_timer_callback(void* context) {
 
     const uint32_t start = furi_get_tick();
 
+    // wait for echo pin to go low if not already there
+    // Just a safeback
     while(furi_get_tick() - start < timeout_ms && furi_hal_gpio_read(echo_pin)) {
-        // wait for echo pin to go low if not already there
-        // Just a safeback
     }
 
+    // wait for echo pin to go high
     while(furi_get_tick() - start < timeout_ms && !furi_hal_gpio_read(echo_pin)) {
-        // wait for echo pin to go high
     }
 
     FuriHalCortexTimer beginTimer = furi_hal_cortex_timer_get(0);
 
+    // wait for echo pin to go low
     while(furi_get_tick() - start < timeout_ms && furi_hal_gpio_read(echo_pin)) {
-        // wait for echo pin to go low
     }
 
     FuriHalCortexTimer endTimer = furi_hal_cortex_timer_get(0);
 
     uint32_t duration = endTimer.start - beginTimer.start;
 
+    model->ticks = duration;
     model->echo_us = cpu_ticks_to_us(duration);
-    model->distance_cm = hc_sr04_duration_to_cm(duration);
+    model->distance_cm = cpu_ticks_to_hc_sr04_cm(duration);
     model->measurement_made = true;
     notification_message(app->notifications, &sequence_blink_stop);
 
@@ -265,7 +316,7 @@ static void sonicmeter_view_measure_timer_callback(void* context) {
 /**
  * @brief      Callback when the user starts the measure screen.
  * @details    This function is called when the user enters the measure screen.  We start a timer to
- *           redraw the screen periodically (so the random number is refreshed).
+ *             redraw the screen periodically.
  * @param      context  The context - SonicMeterApp object.
 */
 static void sonicmeter_view_measure_enter_callback(void* context) {
@@ -305,8 +356,11 @@ static bool sonicmeter_view_measure_custom_event_callback(uint32_t event, void* 
         return true;
     }
     case SonicMeterEventIdOkPressed: {
-        // measure
-        return true;
+        // This app doesn't do anything when the OK button is pressed.
+        // return false because we did not handle it.
+        // Change it to true when you want to handle it.
+
+        return false;
     }
     default:
         return false;
@@ -390,6 +444,18 @@ static SonicMeterApp* sonicmeter_app_alloc() {
     variable_item_set_current_value_text(
         echopin_item, setting_echopin_names[setting_echopin_index]);
 
+    // Setup Debug
+    VariableItem* debug_item = variable_item_list_add(
+        app->variable_item_list_config,
+        setting_debug_config_label,
+        COUNT_OF(setting_debug_values),
+        sonicmeter_setting_debug_change,
+        app);
+
+    uint8_t setting_debug_index = 0;
+    variable_item_set_current_value_index(debug_item, setting_debug_index);
+    variable_item_set_current_value_text(debug_item, setting_debug_names[setting_debug_index]);
+
     view_set_previous_callback(
         variable_item_list_get_view(app->variable_item_list_config),
         sonicmeter_navigation_submenu_callback);
@@ -422,7 +488,7 @@ static SonicMeterApp* sonicmeter_app_alloc() {
         0,
         128,
         64,
-        "A simple app that measures distance using the HC-SR04 module.\n\nauthor: Chris Mavrommatis");
+        "A simple app that measures distance using the HC-SR04 module.\n\nChris Mavrommatis");
 
     view_set_previous_callback(
         widget_get_view(app->widget_about), sonicmeter_navigation_submenu_callback);
@@ -438,6 +504,12 @@ static SonicMeterApp* sonicmeter_app_alloc() {
     return app;
 }
 
+/**
+ * @brief      Initialize the HC-SR04 module.
+ * @details    This function initializes the HC-SR04 module.
+ *             Allocating the resources and setting the initial state.
+ * @param      app  The sonicmeter application object.
+*/
 void hc_sr04_init(SonicMeterApp* app) {
     SonicMeterMeasureModel* model = view_get_model(app->view_measure);
 
@@ -481,6 +553,12 @@ static void sonicmeter_app_free(SonicMeterApp* app) {
     free(app);
 }
 
+/**
+ * @brief      Exit the HC-SR04 module.
+ * @details    This function exits the HC-SR04 module.
+ *             Deallocating the resources and setting the pins back to their initial state.
+ * @param      app  The sonicmeter application object.
+*/
 void hc_sr04_exit(SonicMeterApp* app) {
     SonicMeterMeasureModel* model = view_get_model(app->view_measure);
 
